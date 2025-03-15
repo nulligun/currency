@@ -223,6 +223,7 @@ app.get('/auth/callback', async (req, res) => {
         await collection.updateOne({user_id: user.user_id}, {$set: {user_id: user.user_id, name: user.name, access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires: expiry_date}}, {upsert: true});
         const d = await collection.findOne({user_id: user.user_id});
         users[user.user_id] = d;
+        await subscribe(tokens.access_token);
         res.redirect('/auth/auth/dashboard');
     } catch (error) {
         console.log("error", error);
