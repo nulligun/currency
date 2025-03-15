@@ -179,7 +179,7 @@ async function getUser(token) {
     });
 
     const data = await response.json();
-    return data.data;
+    return data.data[0];
 }
 
 async function sendMessage(message, user_id, token) {
