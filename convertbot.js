@@ -100,8 +100,8 @@ wh.post('/webhook', async (req, res) => {
         // trim it, remove double spaces, and split into an array
         const args = message.trim().replace(/\s+/g, ' ').split(' ');
 
-        const home_currency = users[data.broadcaster.user_id].home_currency || "USD";
-        const active_currency = users[data.broadcaster.user_id].active_currency || "INR";
+        const home_currency = users[data.broadcaster.user_id].home_currency ?? "USD";
+        const active_currency = users[data.broadcaster.user_id].active_currency ?? "INR";
 
         let result = null;
         // if the first argument is fully numeric (allow decimals) then convert it from active currency to home currency
