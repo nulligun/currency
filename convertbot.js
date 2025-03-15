@@ -92,14 +92,15 @@ async function convert(amount, fromc, toc) {
 wh.post('/webhook', async (req, res) => {
     // get json contents
     const data = JSON.parse(req.body.toString());
-    console.log(data);
+    console.log("data,", data);
     // if data.content starts with "!c "
     if (data.content.startsWith("!c ")) {
         // get the rest of the string
         const message = data.content.slice(3);
         // trim it, remove double spaces, and split into an array
         const args = message.trim().replace(/\s+/g, ' ').split(' ');
-
+        console.log("args", args);
+        console.log("users", users);
         const home_currency = users[data.broadcaster.user_id].home_currency ?? "USD";
         const active_currency = users[data.broadcaster.user_id].active_currency ?? "INR";
 
