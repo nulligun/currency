@@ -221,8 +221,8 @@ app.get('/auth/callback', async (req, res) => {
         const expiry_date = new Date(new Date().getTime() + tokens.expires_in * 1000);
         // add the document then store it in the array
         await collection.updateOne({user_id: user.user_id}, {$set: {user_id: user.user_id, name: user.name, access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires: expiry_date}}, {upsert: true});
-        const d = collection.findOne({user_id: user.user_id});
-        users[d.user_id] = d;
+        const d = await collection.findOne({user_id: user.user_id});
+        users[user.user_id] = d;
         res.redirect('/auth/auth/dashboard');
     } catch (error) {
         console.log("error", error);
