@@ -163,9 +163,9 @@ app.get('/auth/kick', async (req, res) => {
 });
 
 // Protected route example
-app.get('/dashboard', (req, res) => {
+app.get('/auth/dashboard', (req, res) => {
     if (!req.session.accessToken) {
-        return res.redirect('/auth/kick');
+        return res.redirect('/auth/auth/kick');
     }
     res.send('Authenticated!');
 });
@@ -222,7 +222,7 @@ app.get('/auth/callback', async (req, res) => {
         await collection.updateOne({user_id: user.user_id}, {$set: {user_id: user.user_id, name: user.name, access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires: expiry_date}}, {upsert: true});
         const d = collection.findOne({user_id: user.user_id});
         users[d.user_id] = d;
-        res.redirect('/dashboard');
+        res.redirect('/auth/auth/dashboard');
     } catch (error) {
         console.log("error", error);
         res.status(500).send('Authentication failed');
