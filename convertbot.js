@@ -46,8 +46,11 @@ let users = {};
 // subscribe each user to the chat events
 for (const user of await cursor.toArray()) {
     // if token is expired then refresh it
+    console.log("start user sub: ", user);
     if (new Date() > user.expires) {
+        console.log("Token is expired, refreshing...");
         const tokens = await authclient.refreshToken(user.refresh_token);
+        console.log("New tokens: ", tokens);
         user.access_token = tokens.access_token;
         const expiry_date = new Date(new Date().getTime() + tokens.expires_in * 1000);
         await collection.updateOne({user_id: user.user_id}, {
@@ -58,6 +61,7 @@ for (const user of await cursor.toArray()) {
     }
     users[user.user_id] = user;
     await subscribe(user.access_token);
+    console.log("subscribed user: ", user.user_id);
 }
 
 const wh = express();
