@@ -49,15 +49,20 @@ for (const user of await cursor.toArray()) {
     console.log("start user sub: ", user);
     if (new Date() > user.expires) {
         console.log("Token is expired, refreshing...");
-        const tokens = await authclient.refreshToken(user.refresh_token);
-        console.log("New tokens: ", tokens);
-        user.access_token = tokens.access_token;
-        const expiry_date = new Date(new Date().getTime() + tokens.expires_in * 1000);
-        await collection.updateOne({user_id: user.user_id}, {
-            $set: {
-                access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires: expiry_date
-            }
-        });
+        try {
+            const tokens = await authclient.refreshToken(user.refresh_token);
+            console.log("New tokens: ", tokens);
+            user.access_token = tokens.access_token;
+            const expiry_date = new Date(new Date().getTime() + tokens.expires_in * 1000);
+            await collection.updateOne({user_id: user.user_id}, {
+                $set: {
+                    access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires: expiry_date
+                }
+            });
+        } catch (err) {
+            console.log("Error refreshing token: ", err);
+            continue;
+        }
     }
     users[user.user_id] = user;
     await subscribe(user.access_token);
