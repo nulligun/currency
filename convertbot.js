@@ -12,27 +12,56 @@ const database = mongoclient.db("convertbot");
 const collection = database.collection('tokens');
 const cursor = collection.find({});
 
-async function subscribe(token) {
-    const response = await fetch('https://api.kick.com/public/v1/events/subscriptions', {
-        method: 'POST',
-        headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({
-            "events": [
-                {
-                    "name": "chat.message.sent",
-                    "version": 1
-                }
-            ],
-            "method": "webhook"
-        })
-    });
+async function subscribe(token, user_id = null) {
+    // If user_id is provided, check if we should refresh the token first
+    if (user_id && users[user_id]) {
+        await refreshTokenIfNeeded(users[user_id]);
+        token = users[user_id].access_token;
+    }
+    
+    try {
+        const response = await fetch('https://api.kick.com/public/v1/events/subscriptions', {
+            method: 'POST',
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`
+            },
+            body: JSON.stringify({
+                "events": [
+                    {
+                        "name": "chat.message.sent",
+                        "version": 1
+                    }
+                ],
+                "method": "webhook"
+            })
+        });
 
-    const data = await response.json();
-    console.log(data);
-    return data;
+        const data = await response.json();
+        console.log(data);
+        
+        // Check if the response indicates an expired token
+        if (data.status === 401 || 
+            (data.error && data.error.toLowerCase().includes('unauthorized')) || 
+            (data.message && data.message.toLowerCase().includes('unauthorized'))) {
+            
+            console.log(`Token seems expired during subscription despite refresh attempt`);
+            
+            // If user_id is provided and we have that user, try a forced refresh
+            if (user_id && users[user_id]) {
+                const refreshSuccessful = await refreshTokenIfNeeded(users[user_id], true);
+                if (refreshSuccessful) {
+                    // Try subscription again with the new token
+                    return subscribe(users[user_id].access_token, user_id);
+                }
+            }
+        }
+        
+        return data;
+    } catch (err) {
+        console.error("Error subscribing to events:", err);
+        return { error: 'Failed to subscribe', details: err.message };
+    }
 }
 
 const authclient = new KickAuthClient({
@@ -43,31 +72,87 @@ const authclient = new KickAuthClient({
 });
 
 let users = {};
-// subscribe each user to the chat events
-for (const user of await cursor.toArray()) {
-    // if token is expired then refresh it
-    console.log("start user sub: ", user);
-    if (new Date() > user.expires) {
-        console.log("Token is expired, refreshing...");
+// Function to refresh a user's token if needed
+async function refreshTokenIfNeeded(user, forceRefresh = false) {
+    // Calculate if token will expire within the next hour (3600 seconds)
+    const expirationBuffer = 3600 * 1000; // 1 hour in milliseconds
+    const willExpireSoon = new Date(user.expires - expirationBuffer) <= new Date();
+    
+    if (forceRefresh || willExpireSoon || new Date() > user.expires) {
+        console.log(`Token for user ${user.user_id} will expire soon or has expired, refreshing...`);
         try {
             const tokens = await authclient.refreshToken(user.refresh_token);
-            console.log("New tokens: ", tokens);
+            console.log("New tokens received");
             user.access_token = tokens.access_token;
+            user.refresh_token = tokens.refresh_token;
             const expiry_date = new Date(new Date().getTime() + tokens.expires_in * 1000);
+            user.expires = expiry_date;
+            
             await collection.updateOne({user_id: user.user_id}, {
                 $set: {
-                    access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires: expiry_date
+                    access_token: tokens.access_token, 
+                    refresh_token: tokens.refresh_token, 
+                    expires: expiry_date
                 }
             });
+            console.log(`Token refreshed for user ${user.user_id}, expires at ${expiry_date}`);
+            return true;
         } catch (err) {
-            console.log("Error refreshing token: ", err);
-            continue;
+            console.error(`Error refreshing token for user ${user.user_id}:`, err);
+            return false;
         }
     }
+    return true; // No refresh needed
+}
+
+// Function to check and refresh all users' tokens
+async function refreshAllTokens() {
+    console.log("Running scheduled token refresh check...");
+    try {
+        // Get all users from the database to check for updates
+        const allUsers = await collection.find({}).toArray();
+        
+        for (const user of allUsers) {
+            // Skip users that aren't in our in-memory cache (they might have been removed)
+            if (!users[user.user_id]) continue;
+            
+            // Update our in-memory user with the latest from DB
+            Object.assign(users[user.user_id], user);
+            
+            // Refresh the token if needed
+            const refreshSuccessful = await refreshTokenIfNeeded(users[user.user_id]);
+            
+            // If refresh failed, log it but continue with other users
+            if (!refreshSuccessful) {
+                console.warn(`Failed to refresh token for user ${user.user_id} during scheduled refresh`);
+            }
+        }
+    } catch (err) {
+        console.error("Error during scheduled token refresh:", err);
+    }
+    console.log("Scheduled token refresh completed");
+}
+
+// Subscribe each user to the chat events
+for (const user of await cursor.toArray()) {
+    console.log("start user sub: ", user);
+    
+    // Attempt to refresh the token if needed
+    const refreshSuccessful = await refreshTokenIfNeeded(user);
+    if (!refreshSuccessful) {
+        console.warn(`Skipping user ${user.user_id} due to token refresh failure`);
+        continue;
+    }
+    
     users[user.user_id] = user;
     await subscribe(user.access_token);
     console.log("subscribed user: ", user.user_id);
 }
+
+// Set up periodic token refresh (every hour)
+const REFRESH_INTERVAL = 60 * 60 * 1000; // 1 hour in milliseconds
+setInterval(refreshAllTokens, REFRESH_INTERVAL);
+console.log(`Token refresh scheduler started, will check tokens every ${REFRESH_INTERVAL/1000/60} minutes`);
 
 const wh = express();
 wh.use(express.raw({ type: 'application/json' }));
@@ -185,33 +270,95 @@ app.get('/auth/dashboard', (req, res) => {
     res.send('Authenticated!');
 });
 
-async function getUser(token) {
-    const response = await fetch('https://api.kick.com/public/v1/users', {
-        method: 'GET',
-        headers: {
-            Authorization: `Bearer ${token}`
-        }
-    });
+async function getUser(token, user_id = null) {
+    // If user_id is provided, check if we should refresh the token first
+    if (user_id && users[user_id]) {
+        await refreshTokenIfNeeded(users[user_id]);
+        token = users[user_id].access_token;
+    }
+    
+    try {
+        const response = await fetch('https://api.kick.com/public/v1/users', {
+            method: 'GET',
+            headers: {
+                Authorization: `Bearer ${token}`
+            }
+        });
 
-    const data = await response.json();
-    return data.data[0];
+        const data = await response.json();
+        
+        // Check if the response indicates an expired token
+        if (!data.data || data.data.length === 0 ||
+            data.status === 401 || 
+            (data.error && data.error.toLowerCase().includes('unauthorized')) || 
+            (data.message && data.message.toLowerCase().includes('unauthorized'))) {
+            
+            console.log(`Token seems expired during user fetch despite refresh attempt`);
+            
+            // If user_id is provided and we have that user, try a forced refresh
+            if (user_id && users[user_id]) {
+                const refreshSuccessful = await refreshTokenIfNeeded(users[user_id], true);
+                if (refreshSuccessful) {
+                    // Try the fetch again with the new token
+                    return getUser(users[user_id].access_token, user_id);
+                }
+            }
+            return null;
+        }
+        
+        return data.data[0];
+    } catch (err) {
+        console.error("Error fetching user:", err);
+        return null;
+    }
 }
 
 async function sendMessage(message, user_id, token) {
-    const response = await fetch('https://api.kick.com/public/v1/chat', {
-        method: 'POST',
-        headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({
-            "broadcaster_user_id": user_id,
-            "content": message,
-            "type": "bot"
-        })
-    });
+    // First ensure we have a valid token
+    if (users[user_id]) {
+        // Check if token needs refreshing before making the API call
+        await refreshTokenIfNeeded(users[user_id]);
+        // Use the potentially refreshed token
+        token = users[user_id].access_token;
+    }
+    
+    try {
+        const response = await fetch('https://api.kick.com/public/v1/chat', {
+            method: 'POST',
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`
+            },
+            body: JSON.stringify({
+                "broadcaster_user_id": user_id,
+                "content": message,
+                "type": "bot"
+            })
+        });
 
-    return await response.json();
+        const result = await response.json();
+        
+        // Check if the response indicates an expired token
+        if (result.status === 401 || 
+            (result.error && result.error.toLowerCase().includes('unauthorized')) || 
+            (result.message && result.message.toLowerCase().includes('unauthorized'))) {
+            console.log(`Token seems expired for user ${user_id} despite refresh attempt`);
+            
+            // If we have the user in memory, try one more forced refresh
+            if (users[user_id]) {
+                const refreshSuccessful = await refreshTokenIfNeeded(users[user_id], true);
+                if (refreshSuccessful) {
+                    // Try the API call again with the newly refreshed token
+                    return sendMessage(message, user_id, users[user_id].access_token);
+                }
+            }
+        }
+        
+        return result;
+    } catch (err) {
+        console.error(`Error sending message to user ${user_id}:`, err);
+        return { error: 'Failed to send message', details: err.message };
+    }
 }
 
 app.get('/auth/callback', async (req, res) => {
