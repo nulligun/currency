@@ -112,7 +112,7 @@ wh.post('/webhook', async (req, res) => {
         console.log("users", users);
         if (!users[data.broadcaster.user_id]) {
             console.log("User not found");
-            await sendMessage("Broadcaster not registered", data.broadcaster.user_id, users[data.broadcaster.user_id].access_token);
+            await sendMessage("Broadcaster not registered, need to renew.", data.broadcaster.user_id);
             return;
         }
         const home_currency = users[data.broadcaster.user_id].home_currency ?? "USD";
