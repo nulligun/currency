@@ -12,6 +12,80 @@ const database = mongoclient.db("convertbot");
 const collection = database.collection('tokens');
 const cursor = collection.find({});
 
+// Store subscriptions for each user to prevent duplicates
+const userSubscriptions = {};
+
+// Get list of current subscriptions for a user
+async function getSubscriptions(token, user_id = null) {
+    // If user_id is provided, check if we should refresh the token first
+    if (user_id && users[user_id]) {
+        await refreshTokenIfNeeded(users[user_id]);
+        token = users[user_id].access_token;
+    }
+    
+    try {
+        const response = await fetch('https://api.kick.com/public/v1/events/subscriptions', {
+            method: 'GET',
+            headers: {
+                Authorization: `Bearer ${token}`
+            }
+        });
+
+        const data = await response.json();
+        
+        // Check if the response indicates an expired token
+        if (data.status === 401 || 
+            (data.error && data.error.toLowerCase().includes('unauthorized')) || 
+            (data.message && data.message.toLowerCase().includes('unauthorized'))) {
+            
+            console.log(`Token seems expired when checking subscriptions`);
+            
+            if (user_id && users[user_id]) {
+                const refreshSuccessful = await refreshTokenIfNeeded(users[user_id], true);
+                if (refreshSuccessful) {
+                    return getSubscriptions(users[user_id].access_token, user_id);
+                }
+            }
+        }
+        
+        return data.data || [];
+    } catch (err) {
+        console.error("Error getting subscriptions:", err);
+        return [];
+    }
+}
+
+// Delete a subscription by its ID
+async function unsubscribe(subscription_id, token, user_id = null) {
+    // If user_id is provided, check if we should refresh the token first
+    if (user_id && users[user_id]) {
+        await refreshTokenIfNeeded(users[user_id]);
+        token = users[user_id].access_token;
+    }
+    
+    try {
+        const response = await fetch(`https://api.kick.com/public/v1/events/subscriptions/${subscription_id}`, {
+            method: 'DELETE',
+            headers: {
+                Authorization: `Bearer ${token}`
+            }
+        });
+
+        if (response.ok) {
+            console.log(`Successfully unsubscribed subscription ${subscription_id}`);
+            return true;
+        } else {
+            const data = await response.json();
+            console.error(`Failed to unsubscribe: ${JSON.stringify(data)}`);
+            return false;
+        }
+    } catch (err) {
+        console.error(`Error unsubscribing from subscription ${subscription_id}:`, err);
+        return false;
+    }
+}
+
+// Clean up existing subscriptions and create a new one
 async function subscribe(token, user_id = null) {
     // If user_id is provided, check if we should refresh the token first
     if (user_id && users[user_id]) {
@@ -20,6 +94,17 @@ async function subscribe(token, user_id = null) {
     }
     
     try {
+        // First, check for existing subscriptions
+        const currentSubscriptions = await getSubscriptions(token, user_id);
+        console.log(`User has ${currentSubscriptions.length} existing subscriptions`);
+        
+        // Remove any existing subscriptions to prevent duplicates
+        for (const subscription of currentSubscriptions) {
+            console.log(`Removing existing subscription ${subscription.id}`);
+            await unsubscribe(subscription.id, token, user_id);
+        }
+        
+        // Now create a new subscription
         const response = await fetch('https://api.kick.com/public/v1/events/subscriptions', {
             method: 'POST',
             headers: {
@@ -38,7 +123,7 @@ async function subscribe(token, user_id = null) {
         });
 
         const data = await response.json();
-        console.log(data);
+        console.log("Subscription response:", data);
         
         // Check if the response indicates an expired token
         if (data.status === 401 || 
@@ -54,6 +139,11 @@ async function subscribe(token, user_id = null) {
                     // Try subscription again with the new token
                     return subscribe(users[user_id].access_token, user_id);
                 }
+            }
+        } else if (data.data && data.data.id) {
+            // Store the subscription ID for this user
+            if (user_id) {
+                userSubscriptions[user_id] = data.data.id;
             }
         }
         
@@ -183,23 +273,71 @@ async function convert(amount, fromc, toc) {
     return `${amount} ${from} is ${result} ${to}`;
 }
 
+// Message deduplication cache
+const processedMessages = new Map();
+const MESSAGE_CACHE_TTL = 60 * 1000; // 1 minute in milliseconds
+
+// Clean up old message IDs periodically to prevent memory leaks
+setInterval(() => {
+    const now = Date.now();
+    for (const [messageId, timestamp] of processedMessages.entries()) {
+        if (now - timestamp > MESSAGE_CACHE_TTL) {
+            processedMessages.delete(messageId);
+        }
+    }
+}, 5 * 60 * 1000); // Clean up every 5 minutes
+
 wh.post('/webhook', async (req, res) => {
-    // get json contents
+    // Get JSON contents
     const data = JSON.parse(req.body.toString());
-    console.log("data,", data);
-    // if data.content starts with "!c "
-    if (data.content.startsWith("!c ")) {
+    console.log("Received webhook data:", data);
+    
+    // Check if message has an ID to deduplicate
+    if (data.id) {
+        // If we've already processed this message, ignore it
+        if (processedMessages.has(data.id)) {
+            console.log(`Ignoring duplicate message with ID: ${data.id}`);
+            res.send('ok');
+            return;
+        }
+        
+        // Mark this message as processed
+        processedMessages.set(data.id, Date.now());
+    } else if (data.message_id) {
+        // Some webhook formats might use message_id instead of id
+        if (processedMessages.has(data.message_id)) {
+            console.log(`Ignoring duplicate message with message_id: ${data.message_id}`);
+            res.send('ok');
+            return;
+        }
+        
+        processedMessages.set(data.message_id, Date.now());
+    } else {
+        // If no message ID is available, create a composite key from content + timestamp + user
+        const compositeKey = `${data.content}_${data.timestamp || Date.now()}_${data.broadcaster?.user_id || 'unknown'}`;
+        if (processedMessages.has(compositeKey)) {
+            console.log(`Ignoring duplicate message with composite key: ${compositeKey}`);
+            res.send('ok');
+            return;
+        }
+        
+        processedMessages.set(compositeKey, Date.now());
+    }
+    
+    // Process message if it starts with "!c "
+    if (data.content && data.content.startsWith("!c ")) {
         // get the rest of the string
         const message = data.content.slice(3);
         // trim it, remove double spaces, and split into an array
         const args = message.trim().replace(/\s+/g, ' ').split(' ');
-        console.log("args", args);
-        console.log("users", users);
+        console.log("Processing command with args:", args);
+        
         if (!users[data.broadcaster.user_id]) {
             console.log("User not found");
             await sendMessage("Broadcaster not registered, need to renew.", data.broadcaster.user_id);
-            return;
+            return res.send('ok');
         }
+        
         const home_currency = users[data.broadcaster.user_id].home_currency ?? "USD";
         const active_currency = users[data.broadcaster.user_id].active_currency ?? "INR";
 
@@ -238,14 +376,13 @@ wh.post('/webhook', async (req, res) => {
             } else {
                 result = await convert(num, code, active_currency);
             }
-
-            // if there is a second arg that matches a currency then convert it from first currency to second currency
         }
 
         if (result) {
             await sendMessage(result, data.broadcaster.user_id, users[data.broadcaster.user_id].access_token);
         }
     }
+    
     res.send('ok');
 });
 
