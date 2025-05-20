@@ -110,6 +110,11 @@ wh.post('/webhook', async (req, res) => {
         const args = message.trim().replace(/\s+/g, ' ').split(' ');
         console.log("args", args);
         console.log("users", users);
+        if (!users[data.broadcaster.user_id]) {
+            console.log("User not found");
+            await sendMessage("Broadcaster not registered", data.broadcaster.user_id, users[data.broadcaster.user_id].access_token);
+            return;
+        }
         const home_currency = users[data.broadcaster.user_id].home_currency ?? "USD";
         const active_currency = users[data.broadcaster.user_id].active_currency ?? "INR";
 
